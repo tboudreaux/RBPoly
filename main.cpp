@@ -101,6 +101,27 @@ struct Envelope {
   std::vector<Point> points;
 };
 
+enum class OutputFormat : uint8_t {
+  FIXED_WIDTH,
+  CSV,
+};
+
+static const std::map<OutputFormat, std::pair<const char*, const char*>> OutputFormatNames = {
+  {OutputFormat::FIXED_WIDTH, {"F", "FIXED"}},
+  {OutputFormat::CSV, {"C", "CSV"}}
+};
+
+enum class OutputLocation : uint8_t {
+  STDOUT,
+  FILE
+};
+
+static const std::map<OutputLocation, std::pair<const char*, const char*>> OutputLocationNames = {
+  {OutputLocation::STDOUT, {"S", "STDOUT"}},
+  {OutputLocation::FILE, {"F", "FILE"}}
+};
+
+
 
 struct Args {
   bool visualize = false;
@@ -110,14 +131,18 @@ struct Args {
   double alpha = 0.1;
   std::string mesh = "stroid.mesh";
   size_t max_iters = 500;
-  double tol = 1e-8;
-  double omega = 1.0;
+  double deform_iter_tol = 1e-2;
+  double final_iter_tol = 1e-8;
+  double omega = 0.5;
   double relax_rate = 0.1;
   bool allow_deformation = true;
   size_t max_deformation_iters = 50;
   double deformation_rtol = 1e-4;
   double deformation_atol = 1e-6;
   int env_ref_levels = 2;
+  OutputFormat output_format = OutputFormat::CSV;
+  std::string output_file = "envelope.csv";
+  OutputLocation output_location = OutputLocation::FILE;
 };
 
 
@@ -162,7 +187,7 @@ void VisualizeFP(const FEM& fem, const FixedPoint& fp, const std::string& prefix
 
 double L2RelativeResidual(const FixedPoint& fp_old, const FixedPoint& fp_new);
 
-std::expected<FixedPoint, FixedPointErrors> iterate_for_constant_shape(const FEM &fem, const Args &args);
+std::expected<FixedPoint, FixedPointErrors> iterate_for_constant_shape(const FEM &fem, const Args &args, bool is_final);
 
 double clip(double h, double relax);
 
@@ -180,7 +205,15 @@ void print_options(const Args& args);
 
 Envelope extract_envelope(const FEM& fem, const Args& args);
 
-std::map<std::string, Verbosity> make_verbosity_map();
+void fw_writer(const Envelope& env, std::ostream& out);
+void csv_writer(const Envelope& env, std::ostream& out);
+void write_output(const Envelope& env, std::ostream& out, const Args& args);
+
+
+template <typename T>
+std::map<std::string, T> invert_pair_map(const std::map<T, std::pair<const char *, const char *>>& forward_map);
+
+
 
 
 /*****************************
@@ -199,7 +232,7 @@ int main(const int argc, char** argv) {
   for (int i = 0; i < args.max_deformation_iters; ++i) {
     std::print("Deformation Step {:3}{}", i, args.verbosity > Verbosity::PER_DEFORMATION ? "\n" : " -- ");
     std::cout << std::flush;
-    const auto solution = iterate_for_constant_shape(fem, args);
+    const auto solution = iterate_for_constant_shape(fem, args, false);
     if (!solution) {
       std::cerr << "Error: " << FixedPointErrorMessages.at(solution.error()) << std::endl;
       exit(1);
@@ -234,15 +267,38 @@ int main(const int argc, char** argv) {
 
 
   }
-  auto solution = iterate_for_constant_shape(fem, args);
+
+  std::println("Performing final iteration with fixed mesh and tolerance {:0.4E}. This may take a moment...", args.final_iter_tol);
+  auto solution = iterate_for_constant_shape(fem, args, true);
   if (!solution) {
     std::cerr << "Error: " << FixedPointErrorMessages.at(solution.error()) << std::endl;
     exit(1);
   }
+  std::println("Solution converged!");
 
-  ViewMesh(HOST, PORT, *fem.mesh_ptr, *solution.value().phi, "Final Potential");
-  ViewMesh(HOST, PORT, *fem.mesh_ptr, *solution.value().h, "Final Enthalpy");
-  ViewMesh(HOST, PORT, *fem.mesh_ptr, *solution.value().rho, "Final Density");
+  if (args.visualize) {
+    ViewMesh(HOST, PORT, *fem.mesh_ptr, *solution.value().phi, "Final Potential");
+    ViewMesh(HOST, PORT, *fem.mesh_ptr, *solution.value().h, "Final Enthalpy");
+    ViewMesh(HOST, PORT, *fem.mesh_ptr, *solution.value().rho, "Final Density");
+  }
+
+  const auto envelope = extract_envelope(fem, args);
+  switch (args.output_location) {
+    case OutputLocation::STDOUT:
+      write_output(envelope, std::cout, args);
+      break;
+    case OutputLocation::FILE:
+      {
+        std::ofstream out(args.output_file);
+        if (!out.is_open()) {
+          std::cerr << "Unable to open output file: " << args.output_file << std::endl;
+          exit(1);
+        }
+        write_output(envelope, out, args);
+      }
+      break;
+  }
+
 }
 
 
@@ -558,7 +614,7 @@ double L2RelativeResidual(const FixedPoint& fp_old, const FixedPoint& fp_new) {
   return (l2_norm > 1e-18) ? (l2_diff/l2_norm) : l2_diff;
 }
 
-std::expected<FixedPoint, FixedPointErrors> iterate_for_constant_shape(const FEM &fem, const Args &args) {
+std::expected<FixedPoint, FixedPointErrors> iterate_for_constant_shape(const FEM &fem, const Args &args, const bool is_final) {
   FixedPoint fp = init_fp(fem, args);
   if (args.visualize && args.verbosity == Verbosity::VERBOSE) {VisualizeFP(fem, fp, "Initial");}
 
@@ -570,13 +626,13 @@ std::expected<FixedPoint, FixedPointErrors> iterate_for_constant_shape(const FEM
 
     fp = new_fp.clone();
     if (args.visualize && args.verbosity == Verbosity::VERBOSE) {VisualizeFP(fem, fp, std::format("Step Number {}", i));}
-    if (err <= args.tol) {
+    if (err <= (is_final ? args.final_iter_tol : args.deform_iter_tol)) {
       if (args.verbosity >= Verbosity::PER_ITERATION) std::println("Convergence reached in {} steps!", i);
       break;
     }
   }
 
-  if (args.visualize) {VisualizeFP(fem, fp, "Final");}
+  if (args.visualize && args.verbosity >= Verbosity::PER_ITERATION) {VisualizeFP(fem, fp, "Final");}
   return fp;
 }
 
@@ -695,7 +751,7 @@ void print_options(const Args& args) {
   std::println("  Density Mixing Alpha: {}", args.alpha);
   std::println("  Mesh File: {}", args.mesh);
   std::println("  Max Iterations: {}", args.max_iters);
-  std::println("  Tolerance: {:5.2E}", args.tol);
+  std::println("  Per Deformation Iteration Tolerance: {:5.2E}", args.deform_iter_tol);
   std::println("  Angular Velocity (Omega): {}", args.omega);
   std::println("  Relaxation Rate: {}", args.relax_rate);
   std::println("  Allow Deformation: {}", args.allow_deformation);
@@ -717,7 +773,8 @@ Args setup_cli(const int argc, char** argv) {
   app.add_option("-a,--alpha", args.alpha, "density mixing strength");
   app.add_option("-m,--mesh", args.mesh, "mesh file to read from");
   app.add_option("-i,--max-iters", args.max_iters, "Max number of iterations");
-  app.add_option("-t,--tol", args.tol, "Relative tolerance to end on");
+  app.add_option("--it,--iter-tol", args.deform_iter_tol, "Relative tolerance to end on [note: can be low]");
+  app.add_option("--ft,--final-tol", args.final_iter_tol, "Final tolerance to end on after deformation [note: should be high]");
   app.add_flag("--no-rotate", no_rotate, "Enable or disable rotation");
   app.add_option("-w,--omega", args.omega, "Arbitrary Unit Angular Velocity");
   app.add_option("-r,--relax-rate", args.relax_rate, "Relaxation rate for boundary displacement");
@@ -726,9 +783,16 @@ Args setup_cli(const int argc, char** argv) {
   app.add_option("--deformation-rtol", args.deformation_rtol, "Relative tolerance for deformation convergence");
   app.add_option("--deformation-atol", args.deformation_atol, "Absolute tolerance for deformation convergence");
 
-  const auto verbosity_map = make_verbosity_map();
-
+  const auto verbosity_map = invert_pair_map(VerbosityNames);
   app.add_option("--verbosity", args.verbosity, "Set the verbosity level")->transform(CLI::CheckedTransformer(verbosity_map, CLI::ignore_case));
+
+  const auto output_format_map = invert_pair_map(OutputFormatNames);
+  app.add_option("--output-format", args.output_format, "Set the output format")->transform(CLI::CheckedTransformer(output_format_map, CLI::ignore_case));
+
+  const auto output_location_map = invert_pair_map(OutputLocationNames);
+  app.add_option("--output-location", args.output_location, "Set the output location")->transform(CLI::CheckedTransformer(output_location_map, CLI::ignore_case));
+
+  app.add_option("-o,--output", args.output_file, "Output file for envelope data");
 
   try {
     app.parse(argc, argv);
@@ -747,8 +811,9 @@ Envelope extract_envelope(const FEM& fem, const Args& args) {
   for (size_t i = 0; i < fem.mesh_ptr->GetNBE(); ++i) {
     mfem::ElementTransformation *trans = fem.mesh_ptr->GetBdrElementTransformation(static_cast<int>(i));
     const mfem::Geometry::Type geom = fem.mesh_ptr->GetBdrElementGeometry(static_cast<int>(i));
-    const mfem::RefinedGeometry *refiner = mfem::GeometryRefiner().Refine(geom, args.env_ref_levels);
-    const mfem::IntegrationRule *ir = &refiner->RefPts;
+    mfem::GeometryRefiner refiner(mfem::Quadrature1D::GaussLobatto);
+    const mfem::RefinedGeometry *refined = refiner.Refine(geom, args.env_ref_levels);
+    const mfem::IntegrationRule *ir = &refined->RefPts;
 
     for (size_t j = 0; j < ir->GetNPoints(); ++j) {
       const mfem::IntegrationPoint &ip = ir->IntPoint(static_cast<int>(j));
@@ -772,11 +837,48 @@ Envelope extract_envelope(const FEM& fem, const Args& args) {
   return env;
 }
 
-std::map<std::string, Verbosity> make_verbosity_map() {
-  std::map<std::string, Verbosity> verbosity_map;
-  for (const auto& [key, pair] : VerbosityNames) {
-    verbosity_map[pair.first] = key;
-    verbosity_map[pair.second] = key;
+template <typename T>
+std::map<std::string, T> invert_pair_map(const std::map<T, std::pair<const char *, const char *>>& forward_map) {
+  std::map<std::string, T> inverted_map;
+  for (const auto& [key, pair] : forward_map) {
+    inverted_map[pair.first] = key;
+    inverted_map[pair.second] = key;
   }
-  return verbosity_map;
+  return inverted_map;
 }
+
+void fw_writer(const Envelope& env, std::ostream& out) {
+  const std::string header = std::format("{:10} {:10} {:10} {:10} {:10} {:10}\n", "x", "y", "z", "r", "IR_ID", "BE_ID");
+  out << header;
+  for (const auto&[x, y, z, r, IR_ID, BE_ID] : env.points) {
+    std::string line = std::format("{:10.5E} {:10.5E} {:10.5E} {:10.5E} {:10} {:10}\n",
+      x, y, z, r, IR_ID, BE_ID);
+    out << line;
+  }
+}
+
+void csv_writer(const Envelope& env, std::ostream& out) {
+  const std::string header = "x,y,z,r,IR_ID,BE_ID\n";
+  out << header;
+  for (const auto&[x, y, z, r, IR_ID, BE_ID] : env.points) {
+    std::string line = std::format("{:.5E},{:.5E},{:.5E},{:.5E},{},{:}\n",
+      x, y, z, r, IR_ID, BE_ID);
+    out << line;
+  }
+
+}
+
+void write_output(const Envelope& env, std::ostream& out, const Args& args) {
+  switch (args.output_format) {
+    case OutputFormat::FIXED_WIDTH:
+      fw_writer(env, out);
+      break;
+    case OutputFormat::CSV:
+      csv_writer(env, out);
+      break;
+    default:
+      std::cerr << "Unsupported output format!" << std::endl;
+      exit(1);
+  }
+}
+
