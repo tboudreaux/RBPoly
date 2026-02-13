@@ -206,9 +206,10 @@ void print_options(const Args& args);
 Envelope extract_envelope(const FEM& fem, const Args& args);
 
 void fw_writer(const Envelope& env, std::ostream& out);
-void csv_writer(const Envelope& env, std::ostream& out);
-void write_output(const Envelope& env, std::ostream& out, const Args& args);
 
+void csv_writer(const Envelope& env, std::ostream& out);
+
+void write_output(const Envelope& env, std::ostream& out, const Args& args);
 
 template <typename T>
 std::map<std::string, T> invert_pair_map(const std::map<T, std::pair<const char *, const char *>>& forward_map);
@@ -706,7 +707,6 @@ std::unique_ptr<mfem::GridFunction> get_nodal_displacement(const FEM& fem, const
   mfem::TransformedCoefficient mag_coeff(&h_coeff, [&args](double h){ return h * args.relax_rate; });
   mfem::VectorFunctionCoefficient dir_coeff(fem.mesh_ptr->Dimension(), radial);
   mfem::ScalarVectorProductCoefficient total_dist_coeff(mag_coeff, dir_coeff);
-
   displacement->ProjectCoefficient(total_dist_coeff);
 
   mfem::BilinearForm a(fem.Vec_H1_fes.get());
@@ -758,6 +758,13 @@ void print_options(const Args& args) {
   std::println("  Max Deformation Iterations: {}", args.max_deformation_iters);
   std::println("  Deformation Relative Tolerance: {:5.2E}", args.deformation_rtol);
   std::println("  Deformation Absolute Tolerance: {:5.2E}", args.deformation_atol);
+  std::println("  Final Iteration Tolerance: {:5.2E}", args.final_iter_tol);
+  std::println("  Output Format: {}", OutputFormatNames.at(args.output_format).second);
+  std::println("  Output Location: {}", OutputLocationNames.at(args.output_location).second);
+  if (args.output_location == OutputLocation::FILE) {
+    std::println("    Output File: {}", args.output_file);
+  }
+  std::println("  Verbosity: {}", VerbosityNames.at(args.verbosity).second);
 }
 
 Args setup_cli(const int argc, char** argv) {
