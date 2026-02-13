@@ -27,7 +27,7 @@ seem to converge reliably; however, they do so very slowly.
 
 
 ## Example
-A 2D slice of the solution for a polytropic index of 1.5 and rotating just below the critical rotation rate is shown below. The color shows
+A 2D slice of the solution for a polytropic index of 1.5 and rotating at 50% of the critical velocity. The color shows
 the effective potential. This visualization was made with GLVis.
 
 ![Example solution](./assets/example.png)
